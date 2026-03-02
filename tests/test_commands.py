@@ -163,3 +163,38 @@ def test_config_get_api_base_defaults_to_opencode_gateway_base():
     config.providers.opencode.api_key = "test-key"
 
     assert config.get_api_base() == "https://opencode.ai/zen/v1"
+
+
+def test_config_matches_azure_cloud_foundry_with_explicit_prefix():
+    config = Config()
+    config.agents.defaults.model = "azure_cloud_foundry/gpt-4o"
+    config.providers.azure_cloud_foundry.api_key = "test-key"
+
+    assert config.get_provider_name() == "azure_cloud_foundry"
+
+
+def test_find_gateway_matches_azure_cloud_foundry_by_provider_name():
+    spec = find_gateway(provider_name="azure_cloud_foundry")
+
+    assert spec is not None
+    assert spec.name == "azure_cloud_foundry"
+
+
+def test_litellm_provider_resolves_azure_cloud_foundry_gateway_to_openai_prefix():
+    provider = LiteLLMProvider(
+        api_key="test-key",
+        default_model="azure_cloud_foundry/gpt-4o",
+        provider_name="azure_cloud_foundry",
+    )
+
+    resolved = provider._resolve_model("azure_cloud_foundry/gpt-4o")
+
+    assert resolved == "openai/gpt-4o"
+
+
+def test_find_gateway_matches_azure_cloud_foundry_by_api_base():
+    spec = find_gateway(api_base="https://sparq-ai-foundry.openai.azure.com/openai/v1/")
+
+    assert spec is not None
+    assert spec.name == "azure_cloud_foundry"
+

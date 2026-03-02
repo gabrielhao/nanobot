@@ -142,6 +142,25 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
     ),
 
+    # Azure Cloud Foundry: OpenAI-compatible gateway
+    # Using standard OPENAI_API_KEY since the user's snippet uses the standard openai python client.
+    ProviderSpec(
+        name="azure_cloud_foundry",
+        keywords=("azure_cloud_foundry", "sparq", "openai.azure.com"),
+        env_key="OPENAI_API_KEY",
+        display_name="Azure Cloud Foundry",
+        litellm_prefix="openai",
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=True,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="openai.azure.com",
+        default_api_base="",
+        strip_model_prefix=True,
+        model_overrides=(),
+    ),
+
     # SiliconFlow (硅基流动): OpenAI-compatible gateway, model names keep org prefix
     ProviderSpec(
         name="siliconflow",
