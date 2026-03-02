@@ -145,8 +145,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     # Azure Cloud Foundry: OpenAI-compatible gateway
     # Using standard OPENAI_API_KEY since the user's snippet uses the standard openai python client.
     ProviderSpec(
-        name="azure_cloud_foundry",
-        keywords=("azure_cloud_foundry", "sparq", "openai.azure.com"),
+        name="azure",
+        keywords=("azure", "openai.azure.com"),
         env_key="OPENAI_API_KEY",
         display_name="Azure Cloud Foundry",
         litellm_prefix="openai",
