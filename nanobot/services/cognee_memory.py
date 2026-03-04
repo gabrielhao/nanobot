@@ -163,16 +163,17 @@ class CogneeMemoryService:
     # Privacy guard
     # -------------------------------------------------------------------------
 
-    async def delete_user_nodes(self, user_id: str) -> None:
+    async def delete_user_nodes(self, user_id: str, *, authenticated_user_id: str) -> None:
         """Delete all nodes and edges associated with a given user ID.
 
-        The exact semantics depend on Cognee's backend; here we forward the
-        user_id and dataset name to a dedicated delete function that can be
-        implemented server-side.
+        Only permits deletion when the caller's authenticated user matches the
+        target user_id to avoid IDOR-style misuse.
         """
+        if authenticated_user_id != user_id:
+            raise CogneeMemoryError("Unauthorized delete_user_nodes request for another user")
+
         try:
             await cognee.delete_nodes(dataset=self.dataset_name, user_id=user_id)
         except Exception as exc:  # pragma: no cover - exercised via dedicated tests
             logger.exception("Cognee delete_nodes failed for user_id=%s", user_id)
             raise CogneeMemoryError(f"Delete failed: {exc}") from exc
-
