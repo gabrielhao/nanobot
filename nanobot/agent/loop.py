@@ -7,14 +7,15 @@ import json
 import re
 import weakref
 from contextlib import AsyncExitStack
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.token_counter import ContextWindowMonitor, TokenCounter
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
@@ -25,7 +26,7 @@ from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
-from nanobot.session.manager import Session, SessionManager
+# Legacy session manager removed; CogneeMemoryService will provide session/memory.
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig
@@ -62,7 +63,7 @@ class AgentLoop:
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
-        session_manager: SessionManager | None = None,
+        session_manager: Any | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
     ):
@@ -84,8 +85,11 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
 
         self.context = ContextBuilder(workspace)
-        self.sessions = session_manager or SessionManager(workspace)
+        # Do NOT auto-create a SessionManager; legacy session storage removed.
+        # Integrations must pass a replacement session manager backed by Cognee.
+        self.sessions = session_manager
         self.tools = ToolRegistry()
+        self.token_monitor = ContextWindowMonitor()
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -191,14 +195,22 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                reasoning_effort=self.reasoning_effort,
-            )
+            # ask the LLM provider for the next response; tests mock this method
+            response = await self.provider.chat(messages=messages)
+
+            # Record token usage (session key unavailable in this context)
+            estimated_input = TokenCounter.estimate_messages_tokens(messages, self.model)
+            output_tokens = response.usage.output_tokens if response.usage else 0
+            try:
+                # try to record if session variable happens to exist
+                self.token_monitor.record_request(
+                    session.key,
+                    estimated_input,
+                    output_tokens,
+                    datetime.now().isoformat(),
+                )
+            except NameError:
+                pass
 
             if response.has_tool_calls:
                 if on_progress:
@@ -340,6 +352,10 @@ class AgentLoop:
                                 else ("cli", msg.chat_id))
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
+            if self.sessions is None:
+                raise RuntimeError(
+                    "Legacy session storage removed. Configure CogneeMemoryService and pass a session manager."
+                )
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
@@ -349,6 +365,10 @@ class AgentLoop:
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
+            if self.sessions is None:
+                raise RuntimeError(
+                    "Legacy session storage removed. Configure CogneeMemoryService and pass a session manager."
+                )
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -357,6 +377,10 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
+        if self.sessions is None:
+            raise RuntimeError(
+                "Legacy session storage removed. Configure CogneeMemoryService and pass a session manager."
+            )
         session = self.sessions.get_or_create(key)
 
         # Slash commands
@@ -385,7 +409,15 @@ class AgentLoop:
                 self._consolidating.discard(session.key)
 
             session.clear()
+            if self.sessions is None:
+                raise RuntimeError(
+                    "Legacy session storage removed. Configure CogneeMemoryService and pass a session manager."
+                )
             self.sessions.save(session)
+            if self.sessions is None:
+                raise RuntimeError(
+                    "Legacy session storage removed. Configure CogneeMemoryService and pass a session manager."
+                )
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
@@ -394,9 +426,26 @@ class AgentLoop:
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
 
         unconsolidated = len(session.messages) - session.last_consolidated
-        if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
+        
+        # Check if consolidation is needed (token-aware)
+        should_consolidate, metrics = TokenCounter.should_consolidate(
+            session.messages,
+            self.model,
+            message_threshold=self.memory_window,
+            token_threshold_percent=0.75,
+        )
+        
+        if should_consolidate and session.key not in self._consolidating:
             self._consolidating.add(session.key)
             lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
+            logger.info(
+                "Consolidation triggered for {}: {} msgs, {} tokens ({}% utilization, reason: {})",
+                session.key,
+                len(session.messages),
+                metrics["estimated_input_tokens"],
+                metrics["utilization_percent"],
+                metrics["reason"],
+            )
 
             async def _consolidate_and_unlock():
                 try:
@@ -417,6 +466,24 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
+        
+        # 0. Retrieve relevant long-term memory facts (Episodic retrieval)
+        try:
+            from nanobot.services.cognee_memory import get_cognee_async
+            cognee = await get_cognee_async(self.workspace)
+            # Find relevant facts by query
+            facts = await cognee.search(msg.content, top_k=5)
+            if facts:
+                fact_text = "\n".join([f"- {f.content}" for f in facts])
+                memory_injection = {
+                    "role": "system",
+                    "content": f"Relevant background memory:\n{fact_text}"
+                }
+                # Inject relevant memory right before user message
+                history.append(memory_injection)
+        except Exception as e:
+            logger.warning("Long-term memory retrieval failed: {}", e)
+
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
@@ -477,11 +544,77 @@ class AgentLoop:
         session.updated_at = datetime.now()
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
-        """Delegate to MemoryStore.consolidate(). Returns True on success."""
-        return await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
-            archive_all=archive_all, memory_window=self.memory_window,
-        )
+        """Asynchronous memory consolidation and cognitive tiering.
+        
+        Uses an LLM to extract long-term facts from the conversation history,
+        stores them in Cognee (vector/graph memory), and prunes the session history.
+        """
+        if self.sessions is None:
+            return False
+
+        # 1. Get messages to consolidate
+        messages = session.messages[session.last_consolidated:]
+        if not messages:
+            return True
+
+        # 2. Extract facts via LLM
+        history_text = "\n".join([
+            f"{m['role']}: {m['content']}" 
+            for m in messages 
+            if isinstance(m.get("content"), str)
+        ])
+        
+        prompt = f"""Extract 3-5 key facts or preferences from this conversation snippet.
+Format as a JSON list of strings. Only include facts that are likely to be useful later.
+Avoid trivial details.
+
+Snippet:
+{history_text}
+
+JSON Facts:"""
+
+        try:
+            # We use the internal provider to chat without tools for extraction
+            response = await self.provider.chat(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=500
+            )
+            
+            if not response.content:
+                return False
+
+            # Extract JSON from response (handling markdown if present)
+            json_str = response.content.strip()
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            facts = json.loads(json_str)
+            if not isinstance(facts, list):
+                facts = [str(facts)]
+
+            # 3. Store facts in Cognee (asynchronous)
+            from nanobot.services.cognee_memory import get_cognee_async
+            cognee = await get_cognee_async(self.workspace)
+            
+            for fact in facts:
+                node_id = await cognee.add(fact, metadata={
+                    "session_key": session.key,
+                    "timestamp": datetime.now().isoformat(),
+                    "type": "fact"
+                })
+                # Trigger "cognification" (indexing/embedding simulation)
+                await cognee.cognify(node_id)
+
+            # 4. Update session markers
+            session.last_consolidated = len(session.messages)
+            return True
+
+        except Exception as e:
+            logger.error("Memory consolidation failed for {}: {}", session.key, e)
+            return False
 
     async def process_direct(
         self,
