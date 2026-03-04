@@ -8,8 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.memory import MemoryStore
+from nanobot.services.cognee_memory import CogneeMemoryService
 from nanobot.agent.skills import SkillsLoader
+from cognee.shared.data_models import SearchType
 
 
 class ContextBuilder:
@@ -20,10 +21,17 @@ class ContextBuilder:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
+        self.memory = CogneeMemoryService(workspace_dir=str(workspace / ".cognee_db"))
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    async def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        memory_context: str | None = None,
+        query: str | None = None,
+        provider: Any | None = None,
+        session_key: str | None = None,
+    ) -> str:
         """Build the system prompt from identity, bootstrap files, memory, and skills."""
         parts = [self._get_identity()]
 
@@ -31,9 +39,23 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        memory = self.memory.get_memory_context()
+        if memory_context is not None:
+            memory = memory_context
+        else:
+            # Query Cognee natively using Graph Completion around the current user query
+            try:
+                # Top k = 3 prevents massive token blobs from graph
+                if query:
+                    search_res = await self.memory.search(query, SearchType.GRAPH_COMPLETION, limit=3)
+                    memory = str(search_res) if search_res else ""
+                else:
+                    memory = ""
+            except Exception as e:
+                # Gracefully degrade if cognee DB is empty or fails
+                memory = ""
+
         if memory:
-            parts.append(f"# Memory\n\n{memory}")
+            parts.append(f"# Core Context & Memory\n\n{memory}")
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -67,8 +89,6 @@ You are nanobot, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 ## nanobot Guidelines
@@ -102,7 +122,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 
         return "\n\n".join(parts) if parts else ""
 
-    def build_messages(
+    async def build_messages(
         self,
         history: list[dict[str, Any]],
         current_message: str,
@@ -110,10 +130,20 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        memory_context: str | None = None,
+        provider: Any | None = None,
+        session_key: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
+        system_prompt = await self.build_system_prompt(
+            skill_names,
+            memory_context=memory_context,
+            query=current_message,
+            provider=provider,
+            session_key=session_key,
+        )
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": system_prompt},
             *history,
             {"role": "user", "content": self._build_runtime_context(channel, chat_id)},
             {"role": "user", "content": self._build_user_content(current_message, media)},
