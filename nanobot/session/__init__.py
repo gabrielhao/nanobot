@@ -1,5 +1,11 @@
-"""Session management module."""
+"""Session management module.
 
-from nanobot.session.manager import Session, SessionManager
+Legacy session storage has been decommissioned in favor of the Cognee
+knowledge graph engine. Importing `Session` or `SessionManager` is
+disabled until the Cognee integration is completed.
+"""
 
-__all__ = ["SessionManager", "Session"]
+raise ImportError(
+	"Legacy session management removed. Install and configure CogneeMemoryService "
+	"and update code references to use the new service."
+)

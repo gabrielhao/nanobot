@@ -11,7 +11,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nanobot.agent.memory import MemoryStore
+# MemoryStore removed during Cognee migration; these tests are no longer applicable.
+try:
+    from nanobot.agent.memory import MemoryStore
+except ImportError:
+    pytest.skip("MemoryStore removed; skipping tests", allow_module_level=True)
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 
 

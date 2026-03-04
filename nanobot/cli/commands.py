@@ -254,7 +254,8 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
-    from nanobot.session.manager import SessionManager
+    # Legacy SessionManager removed. Pass a Cognee-backed session manager here
+    # once Cognee integration is available.
 
     if verbose:
         import logging
@@ -266,7 +267,9 @@ def gateway(
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+    # No legacy session manager: integrations must provide a Cognee-backed replacement.
+    session_manager = None
+    console.print("[yellow]Warning:[/] Legacy session storage removed. Configure CogneeMemoryService and pass a session manager to the AgentLoop.")
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -330,17 +333,21 @@ def gateway(
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
         enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
-        for item in session_manager.list_sessions():
-            key = item.get("key") or ""
-            if ":" not in key:
-                continue
-            channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
-                return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
+        
+        # If session manager is available, prefer a routable external session
+        if session_manager:
+            # Prefer the most recently updated non-internal session on an enabled channel.
+            for item in session_manager.list_sessions():
+                key = item.get("key") or ""
+                if ":" not in key:
+                    continue
+                channel, chat_id = key.split(":", 1)
+                if channel in {"cli", "system"}:
+                    continue
+                if channel in enabled and chat_id:
+                    return channel, chat_id
+        
+        # Fallback: use CLI for local usage
         return "cli", "direct"
 
     # Create heartbeat service

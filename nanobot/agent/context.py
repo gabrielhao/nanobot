@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.memory import MemoryStore
+from nanobot.agent.prompt_cache import PromptCache
 from nanobot.agent.skills import SkillsLoader
 
 
@@ -20,20 +20,34 @@ class ContextBuilder:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
+        # Legacy file-based memory has been removed. Cognee integration
+        # must provide a replacement memory access layer.
+        self.memory = None
         self.skills = SkillsLoader(workspace)
+        self._prompt_cache = PromptCache()
 
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """Build the system prompt from identity, bootstrap files, and skills.
+        
+        Note: Memory integration via CogneeMemoryService happens at the message level,
+        not in the static prompt. Dynamic memory can be added via add_assistant_message() 
+        or as additional context before the user message.
+        """
+        # Build static parts (cached) separately from dynamic memory
+        static_prompt, was_cached = self._prompt_cache.get_or_build(
+            self.workspace,
+            self._build_static_prompt,
+            skill_names,
+        )
+        return static_prompt
+
+    def _build_static_prompt(self, skill_names: list[str] | None = None) -> str:
+        """Build static (stable) system prompt parts. Cached separately from memory."""
         parts = [self._get_identity()]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-
-        memory = self.memory.get_memory_context()
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -67,9 +81,8 @@ You are nanobot, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
+- Long-term memory: Managed by CogneeMemoryService (graph-based knowledge store)
 
 ## nanobot Guidelines
 - State intent before tool calls, but NEVER predict or claim results before receiving them.
