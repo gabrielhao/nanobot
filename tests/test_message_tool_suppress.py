@@ -16,7 +16,28 @@ def _make_loop(tmp_path: Path) -> AgentLoop:
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    return AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10)
+    loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10)
+    # attach a minimal dummy session manager to satisfy runtime checks
+    class _DummySession:
+        def __init__(self, key):
+            self.key = key
+            self.messages = []
+            self.last_consolidated = 0
+        def get_history(self, max_messages=0):
+            return []
+        def clear(self):
+            self.messages = []
+    class DummyMgr:
+        def __init__(self):
+            self._data = {}
+        def get_or_create(self, key):
+            return self._data.setdefault(key, _DummySession(key))
+        def save(self, session):
+            pass
+        def invalidate(self, key):
+            pass
+    loop.sessions = DummyMgr()
+    return loop
 
 
 class TestMessageToolSuppressLogic:

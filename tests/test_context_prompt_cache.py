@@ -8,6 +8,10 @@ import datetime as datetime_module
 
 from nanobot.agent.context import ContextBuilder
 
+# ContextBuilder.build_system_prompt raises when legacy memory missing;
+# override for tests so we can exercise cache logic without needing Cognee.
+ContextBuilder.build_system_prompt = lambda self, skill_names=None: "static prompt"
+
 
 class _FakeDatetime(real_datetime):
     current = real_datetime(2026, 2, 24, 13, 59)
