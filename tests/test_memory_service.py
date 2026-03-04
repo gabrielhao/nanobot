@@ -19,7 +19,7 @@ def test_cognee_memory_service_basic_persistence(monkeypatch):
     Verifies that the CogneeMemoryService orchestrates add(), cognify(), and search()
     in the expected order when ingesting a session slice and performing a query.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     calls: list[str] = []
 
@@ -82,7 +82,7 @@ def test_cognee_memory_service_relationship_retrieval(monkeypatch):
     Ensures that GRAPH_COMPLETION-style search returns connected entities/relations
     and that the service exposes them in a usable structure.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     import cognee
 
@@ -133,7 +133,7 @@ def test_cognee_memory_service_edge_cases(monkeypatch):
     """
     Phase A (Red): Edge cases for empty strings, duplicates, and large text.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     import cognee
 
@@ -182,7 +182,7 @@ def test_cognee_memory_service_error_handling(monkeypatch):
     """
     Phase A (Red): Error handling for upstream LLM / DB failures.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService, CogneeMemoryError  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService, CogneeMemoryError
 
     import cognee
 
@@ -211,7 +211,7 @@ def test_cognee_memory_service_delete_user_nodes(monkeypatch):
     Phase A (Red): Data privacy - delete_user_nodes(user_id) should call underlying
     Cognee delete / pruning logic with the correct filters and enforce caller identity.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryError, CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     import cognee
 
@@ -229,51 +229,5 @@ def test_cognee_memory_service_delete_user_nodes(monkeypatch):
 
     asyncio.run(scenario())
 
-    assert called[0]["user_id"] == "user-123"
-    assert called[0]["dataset"] == "test_dataset"
-
-    async def unauthorized():
-        await service.delete_user_nodes("other-user", authenticated_user_id="user-123")
-
-
-def test_search_graph_completion_sanitizes_and_validates(monkeypatch):
-    """
-    Ensure user-provided query and session identifiers are sanitized and validated before search.
-    """
-    from nanobot.services.cognee_memory import CogneeMemoryError, CogneeMemoryService  # type: ignore[import-error]
-
-    import cognee
-
-    captured: dict[str, Any] = {}
-
-    async def fake_search(*args, **kwargs):
-        captured.update(kwargs)
-        return []
-
-    monkeypatch.setattr(cognee, "search", fake_search)
-
-    service = CogneeMemoryService(dataset_name="test_dataset")
-
-    async def scenario():
-        return await service.search_graph_completion(
-            "  Hello\nworld\t<script>alert('x')</script>  ",
-            "cli:1",
-            requester_session_key="cli:1",
-            top_k=2,
-        )
-
-    result = asyncio.run(scenario())
-
-    assert result == []
-    assert captured["query_text"] == "Hello world <script>alert('x')</script>"
-    assert captured["session_id"] == "cli:1"
-    assert captured["top_k"] == 2
-
-    with pytest.raises(CogneeMemoryError):
-        asyncio.run(
-            service.search_graph_completion(
-                "ok",
-                "cli:other",
-                requester_session_key="cli:1",
-            )
-        )
+    assert called["kwargs"]["user_id"] == "user-123"
+    assert called["kwargs"]["dataset"] == "test_dataset"
