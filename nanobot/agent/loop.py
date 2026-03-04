@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -109,6 +108,7 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._memory_tasks: set[asyncio.Task] = set()  # Strong refs to async memory ingestion tasks
         self._processing_lock = asyncio.Lock()
         self._register_default_tools()
 
@@ -325,6 +325,13 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        for t in list(self._memory_tasks):
+            t.cancel()
+        self._memory_tasks.clear()
+        
+        # Ensure database connections are completely torn down
+        asyncio.create_task(self.context.memory.close())
+        
         logger.info("Agent loop stopping")
 
     async def _process_message(
@@ -343,13 +350,15 @@ class AgentLoop:
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
-            messages = self.context.build_messages(
+            messages = await self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
+                provider=self.provider, session_key=key,
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
-            self._save_turn(session, all_msgs, 1 + len(history))
+            new_entries = self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
+            self._schedule_memory_ingest(key, new_entries, str(msg.sender_id))
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
@@ -417,11 +426,12 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
-        initial_messages = self.context.build_messages(
+        initial_messages = await self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            provider=self.provider, session_key=session.key,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -439,8 +449,9 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
-        self._save_turn(session, all_msgs, 1 + len(history))
+        new_entries = self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
+        self._schedule_memory_ingest(key, new_entries, str(msg.sender_id))
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -452,9 +463,10 @@ class AgentLoop:
             metadata=msg.metadata or {},
         )
 
-    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
+    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> list[dict]:
         """Save new-turn messages into session, truncating large tool results."""
         from datetime import datetime
+        new_entries: list[dict] = []
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
@@ -474,14 +486,48 @@ class AgentLoop:
                     ]
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
+            new_entries.append(entry)
         session.updated_at = datetime.now()
+        return new_entries
+
+    def _schedule_memory_ingest(self, session_key: str, messages: list[dict], user_id: str | None) -> None:
+        """Background ingestion to keep memory writes/indexing off the response hot path."""
+        if not messages:
+            return
+
+        async def _ingest() -> None:
+            try:
+                # Format new messages for ingestion
+                parts = []
+                for m in messages:
+                    role = m.get('role', 'unknown').upper()
+                    content = m.get('content', '')
+                    if content:
+                        parts.append(f"[{m.get('timestamp', '')[:16]}] {role}: {content}")
+                
+                if parts:
+                    text_block = "\n".join(parts)
+                    await self.context.memory.add(text_block, session_key=session_key)
+                    # Trigger the vector/graph compilation for the local session
+                    await self.context.memory.cognify(session_key=session_key)
+            except Exception:
+                logger.exception("Memory ingestion failed for session {}", session_key)
+            finally:
+                task = asyncio.current_task()
+                if task is not None:
+                    self._memory_tasks.discard(task)
+
+        task = asyncio.create_task(_ingest())
+        self._memory_tasks.add(task)
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
-        """Delegate to MemoryStore.consolidate(). Returns True on success."""
-        return await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
-            archive_all=archive_all, memory_window=self.memory_window,
-        )
+        """Mock consolidation. Cognee ECL pipeline removes the need for brute-force LLM compaction."""
+        if archive_all:
+             session.last_consolidated = 0
+             return True
+        else:
+             session.last_consolidated = len(session.messages) - (self.memory_window // 2)
+             return True
 
     async def process_direct(
         self,

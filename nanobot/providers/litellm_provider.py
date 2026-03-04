@@ -290,6 +290,19 @@ class LiteLLMProvider(LLMProvider):
             thinking_blocks=thinking_blocks,
         )
 
+    async def embed(
+        self,
+        texts: list[str],
+        model: str | None = None,
+    ) -> list[list[float]]:
+        """Generate embeddings using LiteLLM."""
+        model = model or "text-embedding-3-small"
+        response = await litellm.aembedding(
+            model=model,
+            input=texts,
+        )
+        return [item["embedding"] for item in response.get("data", [])]
+
     def get_default_model(self) -> str:
         """Get the default model."""
         return self.default_model
