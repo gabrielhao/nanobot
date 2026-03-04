@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.memory import MemoryStore
+from nanobot.services.cognee_memory import CogneeMemoryService
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -85,6 +85,7 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
+        self.memory_service = CogneeMemoryService(dataset_name=str(workspace))
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
             provider=provider,
@@ -417,11 +418,29 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
+
+        # Retrieve long-term memory from Cognee (graph completion) and compact it.
+        cognee_memory_str = ""
+        try:
+            graph_results = await self.memory_service.search_graph_completion(
+                query_text=msg.content,
+                session_key=key,
+            )
+            if graph_results:
+                # Use the top answer as a compact memory summary.
+                top = graph_results[0]
+                answer = str(top.get("answer") or "").strip()
+                cognee_memory_str = answer[:1000] if answer else ""
+        except Exception:
+            logger.exception("Cognee memory retrieval failed; continuing without graph memory")
+
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
-            channel=msg.channel, chat_id=msg.chat_id,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            cognee_memory=cognee_memory_str or None,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -477,11 +496,23 @@ class AgentLoop:
         session.updated_at = datetime.now()
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
-        """Delegate to MemoryStore.consolidate(). Returns True on success."""
-        return await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
-            archive_all=archive_all, memory_window=self.memory_window,
-        )
+        """Consolidate old messages into Cognee-backed memory. Returns True on success."""
+        if archive_all:
+            messages = list(session.messages)
+            keep_count = 0
+        else:
+            keep_count = self.memory_window // 2
+            if len(session.messages) <= keep_count:
+                return True
+            if len(session.messages) - session.last_consolidated <= 0:
+                return True
+            messages = session.messages[session.last_consolidated:-keep_count]
+            if not messages:
+                return True
+
+        await self.memory_service.ingest_session_messages(session.key, messages)
+        session.last_consolidated = 0 if archive_all else len(session.messages) - keep_count
+        return True
 
     async def process_direct(
         self,
