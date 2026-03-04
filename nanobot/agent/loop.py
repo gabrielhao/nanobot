@@ -515,7 +515,7 @@ class AgentLoop:
                     await self.context.memory.add(text_block, session_key=session_key)
                     # Trigger the vector/graph compilation for the local session
                     await self.context.memory.cognify(session_key=session_key)
-            except Exception:
+            except MemoryProviderError:
                 logger.exception("Memory ingestion failed for session {}", session_key)
             finally:
                 task = asyncio.current_task()
