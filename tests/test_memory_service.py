@@ -19,7 +19,7 @@ def test_cognee_memory_service_basic_persistence(monkeypatch):
     Verifies that the CogneeMemoryService orchestrates add(), cognify(), and search()
     in the expected order when ingesting a session slice and performing a query.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     calls: list[str] = []
 
@@ -82,7 +82,7 @@ def test_cognee_memory_service_relationship_retrieval(monkeypatch):
     Ensures that GRAPH_COMPLETION-style search returns connected entities/relations
     and that the service exposes them in a usable structure.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     import cognee
 
@@ -133,7 +133,7 @@ def test_cognee_memory_service_edge_cases(monkeypatch):
     """
     Phase A (Red): Edge cases for empty strings, duplicates, and large text.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     import cognee
 
@@ -182,7 +182,7 @@ def test_cognee_memory_service_error_handling(monkeypatch):
     """
     Phase A (Red): Error handling for upstream LLM / DB failures.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService, CogneeMemoryError  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService, CogneeMemoryError
 
     import cognee
 
@@ -211,7 +211,7 @@ def test_cognee_memory_service_delete_user_nodes(monkeypatch):
     Phase A (Red): Data privacy - delete_user_nodes(user_id) should call underlying
     Cognee delete / pruning logic with the correct filters.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     import cognee
 
@@ -231,4 +231,3 @@ def test_cognee_memory_service_delete_user_nodes(monkeypatch):
 
     assert called["kwargs"]["user_id"] == "user-123"
     assert called["kwargs"]["dataset"] == "test_dataset"
-
