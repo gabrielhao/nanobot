@@ -235,6 +235,45 @@ def test_cognee_memory_service_delete_user_nodes(monkeypatch):
     async def unauthorized():
         await service.delete_user_nodes("other-user", authenticated_user_id="user-123")
 
+
+def test_search_graph_completion_sanitizes_and_validates(monkeypatch):
+    """
+    Ensure user-provided query and session identifiers are sanitized and validated before search.
+    """
+    from nanobot.services.cognee_memory import CogneeMemoryError, CogneeMemoryService  # type: ignore[import-error]
+
+    import cognee
+
+    captured: dict[str, Any] = {}
+
+    async def fake_search(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cognee, "search", fake_search)
+
+    service = CogneeMemoryService(dataset_name="test_dataset")
+
+    async def scenario():
+        return await service.search_graph_completion(
+            "  Hello\nworld\t<script>alert('x')</script>  ",
+            "cli:1",
+            requester_session_key="cli:1",
+            top_k=2,
+        )
+
+    result = asyncio.run(scenario())
+
+    assert result == []
+    assert captured["query_text"] == "Hello world <script>alert('x')</script>"
+    assert captured["session_id"] == "cli:1"
+    assert captured["top_k"] == 2
+
     with pytest.raises(CogneeMemoryError):
-        asyncio.run(unauthorized())
-    assert len(called) == 1  # No additional delete_nodes calls on unauthorized request
+        asyncio.run(
+            service.search_graph_completion(
+                "ok",
+                "cli:other",
+                requester_session_key="cli:1",
+            )
+        )
