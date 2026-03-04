@@ -50,7 +50,7 @@ class ContextBuilder:
                     memory = str(search_res) if search_res else ""
                 else:
                     memory = ""
-            except Exception as e:
+            except MemoryProviderError:
                 # Gracefully degrade if cognee DB is empty or fails
                 memory = ""
 
