@@ -19,7 +19,7 @@ def test_cognee_memory_service_basic_persistence(monkeypatch):
     Verifies that the CogneeMemoryService orchestrates add(), cognify(), and search()
     in the expected order when ingesting a session slice and performing a query.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     calls: list[str] = []
 
@@ -82,7 +82,7 @@ def test_cognee_memory_service_relationship_retrieval(monkeypatch):
     Ensures that GRAPH_COMPLETION-style search returns connected entities/relations
     and that the service exposes them in a usable structure.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     class DummyNode:
         def __init__(self, id: str, label: str) -> None:
@@ -133,7 +133,7 @@ def test_cognee_memory_service_edge_cases(monkeypatch):
     """
     Phase A (Red): Edge cases for empty strings, duplicates, and large text.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     calls: list[Any] = []
 
@@ -231,7 +231,7 @@ def test_cognee_memory_service_error_handling(monkeypatch):
     """
     Phase A (Red): Error handling for upstream LLM / DB failures.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService, CogneeMemoryError  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService, CogneeMemoryError
 
     async def failing_add(*args, **kwargs):
         raise RuntimeError("LLM timeout")
@@ -258,14 +258,14 @@ def test_cognee_memory_service_error_handling(monkeypatch):
 def test_cognee_memory_service_delete_user_nodes(monkeypatch):
     """
     Phase A (Red): Data privacy - delete_user_nodes(user_id) should call underlying
-    Cognee delete / pruning logic with the correct filters.
+    Cognee delete / pruning logic with the correct filters and enforce caller identity.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryService
 
     called: dict[str, Any] = {}
 
     async def fake_delete_nodes(*args, **kwargs):
-        called["kwargs"] = kwargs
+        called.append(kwargs)
 
     from nanobot.services import cognee_memory as memory_module
 
@@ -274,7 +274,7 @@ def test_cognee_memory_service_delete_user_nodes(monkeypatch):
     service = CogneeMemoryService(dataset_name="test_dataset")
 
     async def scenario():
-        await service.delete_user_nodes("user-123")
+        await service.delete_user_nodes("user-123", authenticated_user_id="user-123")
 
     asyncio.run(scenario())
 

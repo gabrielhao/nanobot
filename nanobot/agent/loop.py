@@ -428,6 +428,7 @@ class AgentLoop:
             graph_results = await self.memory_service.search_graph_completion(
                 query_text=msg.content,
                 session_key=key,
+                requester_session_key=msg.session_key,
             )
             if graph_results:
                 # Use the top answer as a compact memory summary.
