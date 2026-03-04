@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -13,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.memory import MemoryStore
+from nanobot.agent.memory import CogneeMemoryService
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -105,10 +104,9 @@ class AgentLoop:
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
         self._mcp_connecting = False
-        self._consolidating: set[str] = set()  # Session keys with consolidation in progress
-        self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
-        self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._memory_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight memory ingestion tasks
+        self.memory = CogneeMemoryService(workspace)
         self._processing_lock = asyncio.Lock()
         self._register_default_tools()
 
@@ -325,6 +323,9 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
+        for t in list(self._memory_tasks):
+            t.cancel()
+        self._memory_tasks.clear()
         logger.info("Agent loop stopping")
 
     async def _process_message(
@@ -343,13 +344,25 @@ class AgentLoop:
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
-            messages = self.context.build_messages(
+            memory_context = await self.memory.retrieve_context(
+                query=msg.content,
+                session_key=key,
+                user_id=str(msg.sender_id),
+            )
+            messages = await self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
+                memory_context=memory_context,
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
-            self._save_turn(session, all_msgs, 1 + len(history))
-            self.sessions.save(session)
+            new_entries = self._save_turn(session, all_msgs, 1 + len(history))
+            self._schedule_memory_ingest(
+                session_key=key,
+                user_id=str(msg.sender_id),
+                channel=channel,
+                chat_id=chat_id,
+                messages=new_entries,
+            )
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
 
@@ -362,27 +375,18 @@ class AgentLoop:
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
-            self._consolidating.add(session.key)
             try:
-                async with lock:
-                    snapshot = session.messages[session.last_consolidated:]
-                    if snapshot:
-                        temp = Session(key=session.key)
-                        temp.messages = list(snapshot)
-                        if not await self._consolidate_memory(temp, archive_all=True):
-                            return OutboundMessage(
-                                channel=msg.channel, chat_id=msg.chat_id,
-                                content="Memory archival failed, session not cleared. Please try again.",
-                            )
+                # Ensure graph memory for this user/session is purged as part of reset.
+                await self.memory.forget_user_nodes(
+                    user_id=str(msg.sender_id),
+                    session_key=session.key,
+                )
             except Exception:
                 logger.exception("/new archival failed for {}", session.key)
                 return OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
                     content="Memory archival failed, session not cleared. Please try again.",
                 )
-            finally:
-                self._consolidating.discard(session.key)
 
             session.clear()
             self.sessions.save(session)
@@ -393,35 +397,23 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
 
-        unconsolidated = len(session.messages) - session.last_consolidated
-        if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
-            self._consolidating.add(session.key)
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
-
-            async def _consolidate_and_unlock():
-                try:
-                    async with lock:
-                        await self._consolidate_memory(session)
-                finally:
-                    self._consolidating.discard(session.key)
-                    _task = asyncio.current_task()
-                    if _task is not None:
-                        self._consolidation_tasks.discard(_task)
-
-            _task = asyncio.create_task(_consolidate_and_unlock())
-            self._consolidation_tasks.add(_task)
-
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
-        initial_messages = self.context.build_messages(
+        memory_context = await self.memory.retrieve_context(
+            query=msg.content,
+            session_key=key,
+            user_id=str(msg.sender_id),
+        )
+        initial_messages = await self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            memory_context=memory_context,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -439,8 +431,14 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
 
-        self._save_turn(session, all_msgs, 1 + len(history))
-        self.sessions.save(session)
+        new_entries = self._save_turn(session, all_msgs, 1 + len(history))
+        self._schedule_memory_ingest(
+            session_key=key,
+            user_id=str(msg.sender_id),
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            messages=new_entries,
+        )
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -452,9 +450,10 @@ class AgentLoop:
             metadata=msg.metadata or {},
         )
 
-    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
+    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> list[dict]:
         """Save new-turn messages into session, truncating large tool results."""
         from datetime import datetime
+        saved: list[dict] = []
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
@@ -474,14 +473,41 @@ class AgentLoop:
                     ]
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
+            saved.append(entry)
         session.updated_at = datetime.now()
+        return saved
 
-    async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
-        """Delegate to MemoryStore.consolidate(). Returns True on success."""
-        return await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
-            archive_all=archive_all, memory_window=self.memory_window,
-        )
+    def _schedule_memory_ingest(
+        self,
+        *,
+        session_key: str,
+        user_id: str | None,
+        channel: str | None,
+        chat_id: str | None,
+        messages: list[dict],
+    ) -> None:
+        """Schedule async ECL ingestion for each interaction turn."""
+        if not messages:
+            return
+
+        async def _ingest() -> None:
+            try:
+                await self.memory.ingest_turn(
+                    session_key=session_key,
+                    user_id=user_id,
+                    channel=channel,
+                    chat_id=chat_id,
+                    messages=messages,
+                )
+            except Exception:
+                logger.exception("Cognee ingestion failed for session {}", session_key)
+            finally:
+                task = asyncio.current_task()
+                if task is not None:
+                    self._memory_tasks.discard(task)
+
+        task = asyncio.create_task(_ingest())
+        self._memory_tasks.add(task)
 
     async def process_direct(
         self,
