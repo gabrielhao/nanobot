@@ -49,14 +49,15 @@ class CogneeMemoryService:
         except Exception as e:
             raise MemoryProviderError(f"Failed to add data to Cognee: {e}") from e
 
-    async def cognify(self, session_key: Optional[str] = None) -> None:
+    async def cognify(self, session_key: Optional[str | list[str]] = None) -> None:
         """Cognify: serialize graph entity generation to prevent write conflicts."""
         async with self._db_lock:
             try:
+                datasets_to_cognify = None
                 if session_key:
-                    await cognee.cognify(datasets=[session_key])
-                else:
-                    await cognee.cognify()
+                    datasets_to_cognify = [session_key] if isinstance(session_key, str) else session_key
+                
+                await cognee.cognify(datasets=datasets_to_cognify)
             except Exception as e:
                 raise MemoryProviderError(f"Failed to cognify data: {e}") from e
 
