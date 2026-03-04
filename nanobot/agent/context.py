@@ -69,8 +69,8 @@ You are nanobot, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: {workspace_path}
-    - Knowledge graph memory: Cognee dataset under {workspace_path}/.cognee
-    - Retrieval mode: SearchType.GRAPH_COMPLETION
+- Knowledge graph memory: Cognee dataset under {workspace_path}/.cognee
+- Retrieval mode: SearchType.GRAPH_COMPLETION
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 ## nanobot Guidelines
