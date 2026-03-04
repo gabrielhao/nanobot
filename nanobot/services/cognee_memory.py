@@ -7,9 +7,10 @@ be exercised easily in tests and swapped to different Cognee backends.
 
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import Any, Iterable, List, Mapping, Sequence
 
-import asyncio
 import cognee
 from cognee import SearchType
 from loguru import logger
@@ -104,12 +105,45 @@ class CogneeMemoryService:
     # Retrieval (GRAPH_COMPLETION)
     # -------------------------------------------------------------------------
 
+    _QUERY_MAX_CHARS = 1000
+
+    @staticmethod
+    def _sanitize_query_text(query_text: str) -> str:
+        """Strip control characters and collapse whitespace to reduce prompt-injection surface."""
+        cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", query_text or "")
+        cleaned = " ".join(cleaned.split())
+        return cleaned[: CogneeMemoryService._QUERY_MAX_CHARS]
+
+    @staticmethod
+    def _validate_session_key(session_key: str, requester_session_key: str | None = None) -> str:
+        """
+        Ensure the session identifier used for Cognee matches the caller's session context
+        and does not contain unsafe characters.
+        """
+        key = (session_key or "").strip()
+        requester_key = (requester_session_key or "").strip()
+
+        # If the caller provided a context-specific session key, require an exact match.
+        if requester_key:
+            if key and key != requester_key:
+                raise CogneeMemoryError("Session key does not belong to the current requester")
+            key = requester_key
+
+        if not key:
+            raise CogneeMemoryError("Session key is required for Cognee search")
+
+        if not re.fullmatch(r"[A-Za-z0-9:@._-]{1,128}", key):
+            raise CogneeMemoryError("Session key contains invalid characters")
+
+        return key
+
     async def search_graph_completion(
         self,
         query_text: str,
         session_key: str,
         *,
         top_k: int = 3,
+        requester_session_key: str | None = None,
     ) -> list[dict[str, Any]]:
         """Run a GRAPH_COMPLETION-style query against the Cognee graph.
 
@@ -117,12 +151,19 @@ class CogneeMemoryService:
         - answer:  LLM-backed natural language answer.
         - edges:   List of {src, dst, rel} edges representing relationships.
         """
+        sanitized_query = self._sanitize_query_text(query_text)
+        if not sanitized_query:
+            logger.warning("Skipping Cognee search: query empty after sanitization")
+            return []
+
+        validated_session = self._validate_session_key(session_key, requester_session_key)
+
         try:
             results: Iterable[Any] = await cognee.search(
-                query_text=query_text,
+                query_text=sanitized_query,
                 search_type=SearchType.GRAPH_COMPLETION,
                 datasets=[self.dataset_name],
-                session_id=session_key,
+                session_id=validated_session,
                 top_k=top_k,
             )
         except Exception as exc:  # pragma: no cover - exercised via other tests
@@ -163,16 +204,17 @@ class CogneeMemoryService:
     # Privacy guard
     # -------------------------------------------------------------------------
 
-    async def delete_user_nodes(self, user_id: str) -> None:
+    async def delete_user_nodes(self, user_id: str, *, authenticated_user_id: str) -> None:
         """Delete all nodes and edges associated with a given user ID.
 
-        The exact semantics depend on Cognee's backend; here we forward the
-        user_id and dataset name to a dedicated delete function that can be
-        implemented server-side.
+        Only permits deletion when the caller's authenticated user matches the
+        target user_id to avoid IDOR-style misuse.
         """
+        if authenticated_user_id != user_id:
+            raise CogneeMemoryError("Unauthorized delete_user_nodes request for another user")
+
         try:
             await cognee.delete_nodes(dataset=self.dataset_name, user_id=user_id)
         except Exception as exc:  # pragma: no cover - exercised via dedicated tests
             logger.exception("Cognee delete_nodes failed for user_id=%s", user_id)
             raise CogneeMemoryError(f"Delete failed: {exc}") from exc
-
