@@ -502,6 +502,11 @@ class AgentLoop:
                 for m in messages:
                     role = m.get('role', 'unknown').upper()
                     content = m.get('content', '')
+                    if isinstance(content, list):
+                        # Extract text from a list of content parts (e.g., for images)
+                        text_parts = [part.get("text", "") for part in content if part.get("type") == "text"]
+                        content = " ".join(text_parts)
+
                     if content:
                         parts.append(f"[{m.get('timestamp', '')[:16]}] {role}: {content}")
                 
