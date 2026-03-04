@@ -9,10 +9,31 @@ from __future__ import annotations
 
 from typing import Any, Iterable, List, Mapping, Sequence
 
+import re
+from enum import Enum
+
 import asyncio
-import cognee
-from cognee import SearchType
 from loguru import logger
+
+try:
+    import cognee
+    from cognee import SearchType
+except Exception:  # pragma: no cover - exercised when optional deps are unavailable
+    class SearchType(Enum):
+        """Minimal fallback so tests can run without Cognee dependencies installed."""
+
+        GRAPH_COMPLETION = "GRAPH_COMPLETION"
+
+    class _MissingCognee:
+        def __getattr__(self, name: str) -> Any:
+            def _missing(*_: Any, **__: Any) -> Any:
+                raise ImportError(
+                    "cognee dependency is required for memory operations; install with project extras"
+                )
+
+            return _missing
+
+    cognee = _MissingCognee()  # type: ignore[assignment]
 
 
 class CogneeMemoryError(RuntimeError):
@@ -41,6 +62,10 @@ class CogneeMemoryService:
         self,
         session_key: str,
         messages: Sequence[Mapping[str, Any]],
+        *,
+        expected_user_id: str | None = None,
+        expected_session_key: str | None = None,
+        allowed_roles: Sequence[str] | None = None,
     ) -> None:
         """Ingest a slice of session messages into the Cognee knowledge graph.
 
@@ -53,6 +78,14 @@ class CogneeMemoryService:
         Any upstream error is wrapped in CogneeMemoryError so callers can handle
         failures gracefully without leaking Cognee's internal exceptions.
         """
+        normalized_session_key = self._sanitize_identifier(
+            expected_session_key or session_key, field="session_key"
+        )
+        if normalized_session_key != session_key:
+            raise CogneeMemoryError("Session key failed validation")
+
+        allowed_roles_set = set(allowed_roles or ("user", "assistant", "system", "tool"))
+
         # Step 1: Extract non-empty message contents along with basic metadata.
         contents: List[tuple[str, Mapping[str, Any]]] = []
         for msg in messages:
@@ -78,15 +111,35 @@ class CogneeMemoryService:
             async with self._ecl_lock:
                 # Step 2: Load via cognee.add (can be called multiple times).
                 for text, msg in unique_contents:
+                    role = self._normalize_role(msg.get("role"), allowed_roles_set)
+                    if role is None:
+                        logger.warning("Skipping message with unexpected role: %s", msg.get("role"))
+                        continue
+
+                    user_id = self._sanitize_identifier(
+                        msg.get("user_id"), field="user_id", allow_empty=True
+                    )
+                    if expected_user_id and user_id and user_id != expected_user_id:
+                        logger.warning("Skipping message with mismatched user_id for session %s", session_key)
+                        continue
+
+                    channel = self._sanitize_identifier(
+                        msg.get("channel"), field="channel", allow_empty=True
+                    )
+                    safe_text = self._sanitize_content(text)
+                    if not safe_text:
+                        continue
+
                     await cognee.add(
-                        data=text,
+                        data=safe_text,
                         dataset=self.dataset_name,
                         metadata={
-                            "session_key": session_key,
-                            "role": msg.get("role"),
+                            "session_key": normalized_session_key,
+                            "role": role,
                             "timestamp": msg.get("timestamp"),
-                            "channel": msg.get("channel"),
-                            "user_id": msg.get("user_id"),
+                            "channel": channel,
+                            "user_id": user_id,
+                            "untrusted_source": True,
                         },
                     )
 
@@ -176,3 +229,51 @@ class CogneeMemoryService:
             logger.exception("Cognee delete_nodes failed for user_id=%s", user_id)
             raise CogneeMemoryError(f"Delete failed: {exc}") from exc
 
+    # -------------------------------------------------------------------------
+    # Internal helpers
+    # -------------------------------------------------------------------------
+
+    _IDENTIFIER_PATTERN = re.compile(r"^[\w:@\-.]{1,128}$")
+    _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+    def _sanitize_identifier(
+        self, value: Any, *, field: str, allow_empty: bool = False
+    ) -> str | None:
+        """Normalize identifiers to a conservative ASCII pattern."""
+        if value is None:
+            if allow_empty:
+                return None
+            raise CogneeMemoryError(f"{field} is required")
+        if not isinstance(value, str):
+            if allow_empty:
+                return None
+            raise CogneeMemoryError(f"{field} must be a string")
+        trimmed = value.strip()
+        if not trimmed:
+            if allow_empty:
+                return None
+            raise CogneeMemoryError(f"{field} is required")
+        if not self._IDENTIFIER_PATTERN.match(trimmed):
+            if allow_empty:
+                logger.warning("%s failed validation; dropping value", field)
+                return None
+            raise CogneeMemoryError(f"{field} failed validation")
+        return trimmed
+
+    def _sanitize_content(self, text: str) -> str:
+        """Strip control chars and mark payload as untrusted for downstream LLMs."""
+        cleaned = self._CONTROL_CHARS.sub(" ", text).strip()
+        if not cleaned:
+            return ""
+        max_len = 8000
+        if len(cleaned) > max_len:
+            cleaned = f"{cleaned[:max_len]}... [truncated]"
+        return "[UNTRUSTED SESSION MESSAGE]\\n" + cleaned
+
+    @staticmethod
+    def _normalize_role(role: Any, allowed_roles: set[str]) -> str | None:
+        """Coerce roles to a lowercase allowlist."""
+        if not isinstance(role, str):
+            return None
+        normalized = role.strip().lower()
+        return normalized if normalized in allowed_roles else None
