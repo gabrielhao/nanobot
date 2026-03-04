@@ -43,10 +43,10 @@ def test_cognee_memory_service_basic_persistence(monkeypatch):
     # Patch cognee top-level API
     import cognee
 
-    monkeypatch.setattr(cognee, "add", fake_add)
-    monkeypatch.setattr(cognee, "cognify", fake_cognify)
-    monkeypatch.setattr(cognee, "memify", fake_memify)
-    monkeypatch.setattr(cognee, "search", fake_search)
+    monkeypatch.setattr(cognee, "add", fake_add, raising=False)
+    monkeypatch.setattr(cognee, "cognify", fake_cognify, raising=False)
+    monkeypatch.setattr(cognee, "memify", fake_memify, raising=False)
+    monkeypatch.setattr(cognee, "search", fake_search, raising=False)
 
     service = CogneeMemoryService(dataset_name="test_dataset")
 
@@ -151,10 +151,10 @@ def test_cognee_memory_service_edge_cases(monkeypatch):
     async def fake_search(*args, **kwargs):
         return []
 
-    monkeypatch.setattr(cognee, "add", fake_add)
-    monkeypatch.setattr(cognee, "cognify", fake_cognify)
-    monkeypatch.setattr(cognee, "memify", fake_memify)
-    monkeypatch.setattr(cognee, "search", fake_search)
+    monkeypatch.setattr(cognee, "add", fake_add, raising=False)
+    monkeypatch.setattr(cognee, "cognify", fake_cognify, raising=False)
+    monkeypatch.setattr(cognee, "memify", fake_memify, raising=False)
+    monkeypatch.setattr(cognee, "search", fake_search, raising=False)
 
     service = CogneeMemoryService(dataset_name="test_dataset")
 
@@ -209,26 +209,32 @@ def test_cognee_memory_service_error_handling(monkeypatch):
 def test_cognee_memory_service_delete_user_nodes(monkeypatch):
     """
     Phase A (Red): Data privacy - delete_user_nodes(user_id) should call underlying
-    Cognee delete / pruning logic with the correct filters.
+    Cognee delete / pruning logic with the correct filters and enforce caller identity.
     """
-    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+    from nanobot.services.cognee_memory import CogneeMemoryError, CogneeMemoryService  # type: ignore[import-error]
 
     import cognee
 
-    called: dict[str, Any] = {}
+    called: list[dict[str, Any]] = []
 
     async def fake_delete_nodes(*args, **kwargs):
-        called["kwargs"] = kwargs
+        called.append(kwargs)
 
-    monkeypatch.setattr(cognee, "delete_nodes", fake_delete_nodes)
+    monkeypatch.setattr(cognee, "delete_nodes", fake_delete_nodes, raising=False)
 
     service = CogneeMemoryService(dataset_name="test_dataset")
 
     async def scenario():
-        await service.delete_user_nodes("user-123")
+        await service.delete_user_nodes("user-123", authenticated_user_id="user-123")
 
     asyncio.run(scenario())
 
-    assert called["kwargs"]["user_id"] == "user-123"
-    assert called["kwargs"]["dataset"] == "test_dataset"
+    assert called[0]["user_id"] == "user-123"
+    assert called[0]["dataset"] == "test_dataset"
 
+    async def unauthorized():
+        await service.delete_user_nodes("other-user", authenticated_user_id="user-123")
+
+    with pytest.raises(CogneeMemoryError):
+        asyncio.run(unauthorized())
+    assert len(called) == 1  # No additional delete_nodes calls on unauthorized request
