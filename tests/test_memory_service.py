@@ -41,12 +41,12 @@ def test_cognee_memory_service_basic_persistence(monkeypatch):
         return [DummyResult("ok")]
 
     # Patch cognee top-level API
-    import cognee
+    from nanobot.services import cognee_memory as memory_module
 
-    monkeypatch.setattr(cognee, "add", fake_add, raising=False)
-    monkeypatch.setattr(cognee, "cognify", fake_cognify, raising=False)
-    monkeypatch.setattr(cognee, "memify", fake_memify, raising=False)
-    monkeypatch.setattr(cognee, "search", fake_search, raising=False)
+    monkeypatch.setattr(memory_module.cognee, "add", fake_add)
+    monkeypatch.setattr(memory_module.cognee, "cognify", fake_cognify)
+    monkeypatch.setattr(memory_module.cognee, "memify", fake_memify)
+    monkeypatch.setattr(memory_module.cognee, "search", fake_search)
 
     service = CogneeMemoryService(dataset_name="test_dataset")
 
@@ -84,8 +84,6 @@ def test_cognee_memory_service_relationship_retrieval(monkeypatch):
     """
     from nanobot.services.cognee_memory import CogneeMemoryService
 
-    import cognee
-
     class DummyNode:
         def __init__(self, id: str, label: str) -> None:
             self.id = id
@@ -113,7 +111,9 @@ def test_cognee_memory_service_relationship_retrieval(monkeypatch):
     async def fake_search(*args, **kwargs):
         return [DummyResult()]
 
-    monkeypatch.setattr(cognee, "search", fake_search)
+    from nanobot.services import cognee_memory as memory_module
+
+    monkeypatch.setattr(memory_module.cognee, "search", fake_search)
 
     service = CogneeMemoryService(dataset_name="test_dataset")
 
@@ -135,8 +135,6 @@ def test_cognee_memory_service_edge_cases(monkeypatch):
     """
     from nanobot.services.cognee_memory import CogneeMemoryService
 
-    import cognee
-
     calls: list[Any] = []
 
     async def fake_add(*args, **kwargs):
@@ -151,10 +149,12 @@ def test_cognee_memory_service_edge_cases(monkeypatch):
     async def fake_search(*args, **kwargs):
         return []
 
-    monkeypatch.setattr(cognee, "add", fake_add, raising=False)
-    monkeypatch.setattr(cognee, "cognify", fake_cognify, raising=False)
-    monkeypatch.setattr(cognee, "memify", fake_memify, raising=False)
-    monkeypatch.setattr(cognee, "search", fake_search, raising=False)
+    from nanobot.services import cognee_memory as memory_module
+
+    monkeypatch.setattr(memory_module.cognee, "add", fake_add)
+    monkeypatch.setattr(memory_module.cognee, "cognify", fake_cognify)
+    monkeypatch.setattr(memory_module.cognee, "memify", fake_memify)
+    monkeypatch.setattr(memory_module.cognee, "search", fake_search)
 
     service = CogneeMemoryService(dataset_name="test_dataset")
 
@@ -173,9 +173,58 @@ def test_cognee_memory_service_edge_cases(monkeypatch):
 
     # Expect that empty content was filtered out, duplicates deduplicated, and big text accepted once.
     non_empty = [c for c in calls if c]
-    assert "duplicate" in non_empty
-    assert non_empty.count("duplicate") == 1
-    assert any(isinstance(c, str) and len(c) == len(big_text) for c in non_empty)
+    assert sum("duplicate" in c for c in non_empty) == 1
+    assert any(isinstance(c, str) and c.startswith("[UNTRUSTED SESSION MESSAGE]") for c in non_empty)
+    assert any(isinstance(c, str) and c.endswith("... [truncated]") for c in non_empty)
+
+
+def test_cognee_memory_service_validates_identity(monkeypatch):
+    """
+    Phase B (Green): Validate roles/user identities and sanitize content before ingest.
+    """
+    from nanobot.services.cognee_memory import CogneeMemoryService  # type: ignore[import-error]
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_add(*args, **kwargs):
+        calls.append(kwargs)
+
+    async def fake_cognify(*args, **kwargs):
+        return None
+
+    async def fake_memify(*args, **kwargs):
+        return None
+
+    from nanobot.services import cognee_memory as memory_module
+
+    monkeypatch.setattr(memory_module.cognee, "add", fake_add)
+    monkeypatch.setattr(memory_module.cognee, "cognify", fake_cognify)
+    monkeypatch.setattr(memory_module.cognee, "memify", fake_memify)
+
+    service = CogneeMemoryService(dataset_name="test_dataset")
+
+    messages = [
+        {"role": "user", "content": "Keep this", "timestamp": "2026-01-01T00:00:00", "user_id": "user-123"},
+        {"role": "hacker", "content": "DROP TABLE", "timestamp": "2026-01-01T00:00:01", "user_id": "evil"},
+    ]
+
+    async def scenario():
+        await service.ingest_session_messages(
+            "cli:1",
+            messages,
+            expected_user_id="user-123",
+            expected_session_key="cli:1",
+        )
+
+    asyncio.run(scenario())
+
+    assert len(calls) == 1
+    assert calls[0]["metadata"]["user_id"] == "user-123"
+    assert calls[0]["metadata"]["session_key"] == "cli:1"
+    assert calls[0]["metadata"]["role"] == "user"
+    assert calls[0]["metadata"]["untrusted_source"] is True
+    assert calls[0]["data"].startswith("[UNTRUSTED SESSION MESSAGE]")
+    assert "DROP TABLE" not in calls[0]["data"]
 
 
 def test_cognee_memory_service_error_handling(monkeypatch):
@@ -184,12 +233,12 @@ def test_cognee_memory_service_error_handling(monkeypatch):
     """
     from nanobot.services.cognee_memory import CogneeMemoryService, CogneeMemoryError
 
-    import cognee
-
     async def failing_add(*args, **kwargs):
         raise RuntimeError("LLM timeout")
 
-    monkeypatch.setattr(cognee, "add", failing_add)
+    from nanobot.services import cognee_memory as memory_module
+
+    monkeypatch.setattr(memory_module.cognee, "add", failing_add)
 
     service = CogneeMemoryService(dataset_name="test_dataset")
 
@@ -213,14 +262,14 @@ def test_cognee_memory_service_delete_user_nodes(monkeypatch):
     """
     from nanobot.services.cognee_memory import CogneeMemoryService
 
-    import cognee
-
-    called: list[dict[str, Any]] = []
+    called: dict[str, Any] = {}
 
     async def fake_delete_nodes(*args, **kwargs):
         called.append(kwargs)
 
-    monkeypatch.setattr(cognee, "delete_nodes", fake_delete_nodes, raising=False)
+    from nanobot.services import cognee_memory as memory_module
+
+    monkeypatch.setattr(memory_module.cognee, "delete_nodes", fake_delete_nodes)
 
     service = CogneeMemoryService(dataset_name="test_dataset")
 

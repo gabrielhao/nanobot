@@ -359,6 +359,9 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        session.metadata.setdefault("user_id", msg.sender_id)
+        session.metadata.setdefault("channel", msg.channel)
+        session.metadata.setdefault("chat_id", msg.chat_id)
 
         # Slash commands
         cmd = msg.content.strip().lower()
@@ -511,7 +514,12 @@ class AgentLoop:
             if not messages:
                 return True
 
-        await self.memory_service.ingest_session_messages(session.key, messages)
+        await self.memory_service.ingest_session_messages(
+            session.key,
+            messages,
+            expected_user_id=session.metadata.get("user_id"),
+            expected_session_key=session.key,
+        )
         session.last_consolidated = 0 if archive_all else len(session.messages) - keep_count
         return True
 
