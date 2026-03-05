@@ -8,12 +8,6 @@ from typing import Any, Optional
 import cognee
 from cognee import SearchType
 from loguru import logger
-from pydantic import BaseModel
-
-class UserFact(BaseModel):
-    """Explicit Ontology for Memory Nodes to reduce schema hallucinations."""
-    fact_type: str
-    description: str
 
 class MemoryProviderError(Exception):
     """Exception raised for errors in the external Memory/Graph Provider."""
@@ -31,10 +25,9 @@ class CogneeMemoryService:
         # Concurrency safety for local DB writes
         self._db_lock = asyncio.Lock()
         
-        # Ensure we don't break if api keys are missing
-        self.api_key = os.environ.get("LLM_API_KEY", "")
+        # Fallback to env variables if not explicitly provided
+        self.api_key = os.environ.get("LLM_API_KEY")
         if self.api_key:
-            os.environ["OPENAI_API_KEY"] = self.api_key
             if hasattr(cognee.config, "set_llm_api_key"):
                 cognee.config.set_llm_api_key(self.api_key)
 
@@ -44,8 +37,7 @@ class CogneeMemoryService:
             return
             
         try:
-            fact = UserFact(fact_type="Conversation Log", description=text)
-            await cognee.add([fact], dataset_name=session_key)
+            await cognee.add([text], dataset_name=session_key)
         except Exception as e:
             raise MemoryProviderError(f"Failed to add data to Cognee: {e}") from e
 
@@ -74,7 +66,7 @@ class CogneeMemoryService:
     async def search(self, query: str, search_type: SearchType, limit: int = 5) -> Any:
         """Load: Search graph or vector DB with strict limits."""
         try:
-            results = await cognee.search(search_type, query_text=query, limit=limit)
+            results = await cognee.search(query_text=query, query_type=search_type, top_k=limit)
             return results
         except Exception as e:
             raise MemoryProviderError(f"Failed to search memory: {e}") from e
