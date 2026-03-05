@@ -10,7 +10,7 @@ from typing import Any
 
 from nanobot.services.cognee_memory import CogneeMemoryService
 from nanobot.agent.skills import SkillsLoader
-from cognee.shared.data_models import SearchType
+from cognee import SearchType
 
 
 class ContextBuilder:

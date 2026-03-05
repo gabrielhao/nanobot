@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import cognee
-from cognee.shared.data_models import SearchType
+from cognee import SearchType
 from loguru import logger
 from pydantic import BaseModel
 
