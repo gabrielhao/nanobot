@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Two-layer memory system with grep-based recall.
+description: Three-tier Neuro-Episodic Cognitive Architecture (NECA) with semantic recall.
 always: true
 ---
 
@@ -8,24 +8,20 @@ always: true
 
 ## Structure
 
-- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
-- `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep. Each entry starts with [YYYY-MM-DD HH:MM].
+- **Tier 1: Working State** — A concise summary of the current task, intent, and progress. Always loaded.
+- **Tier 2: Semantic Facts** (`memory/MEMORY.md`) — Long-term facts (preferences, project context, relationships). Always loaded.
+- **Tier 3: Episodic Retrieval** (`memory/HISTORY.md`) — Semantic search automatically retrieves the top 3 relevant snippets from your past conversations based on your current turn.
 
 ## Search Past Events
+
+While semantic search is automatic, you can still perform manual deep searches:
 
 ```bash
 grep -i "keyword" memory/HISTORY.md
 ```
 
-Use the `exec` tool to run grep. Combine patterns: `grep -iE "meeting|deadline" memory/HISTORY.md`
+## How to use Memory
 
-## When to Update MEMORY.md
-
-Write important facts immediately using `edit_file` or `write_file`:
-- User preferences ("I prefer dark mode")
-- Project context ("The API uses OAuth2")
-- Relationships ("Alice is the project lead")
-
-## Auto-consolidation
-
-Old conversations are automatically summarized and appended to HISTORY.md when the session grows large. Long-term facts are extracted to MEMORY.md. You don't need to manage this.
+- **Write**: For important, static facts, edit `memory/MEMORY.md` directly.
+- **Recall**: Just mention a past event; the semantic system will automatically pull the most relevant context into your prompt.
+- **Continuity**: The "Working State" summary ensures you never lose track of complex multi-step tasks across conversation boundaries.
